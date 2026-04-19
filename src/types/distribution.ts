@@ -1,7 +1,7 @@
 /**
  * Supported geographic/economic benchmark regions.
  */
-export type Region = 'Taiwan' | 'Advanced_Economies' | 'Global';
+export type Region = 'Taiwan' | 'Advanced_Economies' | 'Global' | 'Hong_Kong' | 'Singapore' | 'Japan';
 
 /**
  * The two wealth metrics supported by the calculator.

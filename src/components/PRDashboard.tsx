@@ -31,12 +31,15 @@ const DATA_BRACKETS: AgeBracket[] = [
   '20-24', '25-29', '30-34', '35-39', '40-44',
   '45-49', '50-54', '55-59', '60-64',
 ];
-const REGIONS: Region[] = ['Taiwan', 'Advanced_Economies', 'Global'];
+const GLOBAL_REGIONS: Region[] = ['Taiwan', 'Advanced_Economies', 'Global'];
+const ASIA_REGIONS: Region[] = ['Hong_Kong', 'Singapore', 'Japan'];
+const ALL_REGIONS: Region[] = [...GLOBAL_REGIONS, ...ASIA_REGIONS];
 
 type Lang = 'zh' | 'en';
 type ComparisonMode = 'same-age' | 'all-ages';
 type ExplorerMetric = MetricType;
 type ShareStatus = 'idle' | 'downloaded' | 'copied';
+type PRResults = Record<Region, { income: number; netWorth: number }>;
 
 // ── Curve shapes ──────────────────────────────────────────────────────────────
 
@@ -156,15 +159,55 @@ function NumericInput({ value, onChange, step = 10000 }: NumericInputProps) {
   );
 }
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Info Tooltip ──────────────────────────────────────────────────────────────
 
-interface PRResults {
-  Taiwan_Income: number;
-  Taiwan_NetWorth: number;
-  Advanced_Economies_Income: number;
-  Advanced_Economies_NetWorth: number;
-  Global_Income: number;
-  Global_NetWorth: number;
+function InfoTooltip({ lang }: { lang: Lang }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [open]);
+
+  return (
+    <span ref={ref} className="relative inline-flex items-center">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="ml-1.5 inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-600 text-[9px] text-slate-500 transition-colors hover:border-slate-400 hover:text-slate-300"
+        aria-label={lang === 'zh' ? '百分位說明' : 'What is percentile rank?'}
+      >
+        i
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-20 mt-2 w-64 rounded-xl border border-slate-600 bg-slate-900 p-3.5 text-[11px] leading-relaxed text-slate-300 shadow-2xl">
+          {lang === 'zh' ? (
+            <>
+              <p className="mb-1.5 font-medium text-slate-200">什麼是百分位排名？</p>
+              <p>
+                百分位排名（PR）代表你的數值<span className="text-blue-300">高於多少比例的人</span>。
+                例如 PR&nbsp;80 表示你高於對照組中 80% 的人，也就是前 20%。
+              </p>
+              <p className="mt-1.5 text-slate-500">數值範圍：0 ～ 99.99。</p>
+            </>
+          ) : (
+            <>
+              <p className="mb-1.5 font-medium text-slate-200">What is percentile rank?</p>
+              <p>
+                Percentile rank (PR) shows <span className="text-blue-300">what share of people you rank above</span>.
+                A score of 80 means you&apos;re above 80% of the comparison group — the top 20%.
+              </p>
+              <p className="mt-1.5 text-slate-500">Scale: 0 to 99.99.</p>
+            </>
+          )}
+        </div>
+      )}
+    </span>
+  );
 }
 
 // ── PR computation ─────────────────────────────────────────────────────────────
@@ -179,15 +222,18 @@ function computeResults(
   const bracket: AgeBracket = mode === 'all-ages' ? 'all' : age;
   const out: Partial<PRResults> = {};
 
-  for (const region of REGIONS) {
+  for (const region of ALL_REGIONS) {
     const bd = data[region]?.[bracket];
     if (!bd) return null;
 
-    const incVal = region === 'Taiwan' ? income : income / twdRate;
-    const nwVal = region === 'Taiwan' ? netWorth : netWorth / twdRate;
+    const isTWD = region === 'Taiwan';
+    const incVal = isTWD ? income : income / twdRate;
+    const nwVal = isTWD ? netWorth : netWorth / twdRate;
 
-    out[`${region}_Income` as keyof PRResults] = calculatePR(incVal, bd.Annual_Income);
-    out[`${region}_NetWorth` as keyof PRResults] = calculatePR(nwVal, bd.Net_Worth);
+    out[region] = {
+      income: calculatePR(incVal, bd.Annual_Income),
+      netWorth: calculatePR(nwVal, bd.Net_Worth),
+    };
   }
   return out as PRResults;
 }
@@ -237,13 +283,12 @@ async function generateShareImage(
   const regionLabels = lang === 'zh' ? ['台灣', '先進經濟體', '全球'] : ['Taiwan', 'Adv. Econ.', 'Global'];
   const cols = [28, 232, 436];
 
-  const drawRow = (sectionLabel: string, keys: (keyof PRResults)[], yBase: number) => {
+  const drawRow = (sectionLabel: string, prValues: number[], yBase: number) => {
     ctx.fillStyle = '#475569';
     ctx.font = font(9, 600);
     ctx.fillText(sectionLabel.toUpperCase(), 28, yBase + 14);
 
-    keys.forEach((key, i) => {
-      const pr = results[key];
+    prValues.forEach((pr, i) => {
       const x = cols[i];
       ctx.fillStyle = '#475569';
       ctx.font = font(10);
@@ -262,13 +307,13 @@ async function generateShareImage(
 
   drawRow(
     lang === 'zh' ? '年收入排名' : 'Annual Income Rank',
-    ['Taiwan_Income', 'Advanced_Economies_Income', 'Global_Income'],
+    [results.Taiwan.income, results.Advanced_Economies.income, results.Global.income],
     86
   );
   sep(190);
   drawRow(
     lang === 'zh' ? '淨資產排名' : 'Net Worth Rank',
-    ['Taiwan_NetWorth', 'Advanced_Economies_NetWorth', 'Global_NetWorth'],
+    [results.Taiwan.netWorth, results.Advanced_Economies.netWorth, results.Global.netWorth],
     200
   );
   sep(302);
@@ -294,10 +339,11 @@ interface KPICardProps {
   pr: number;
   distribution: DistributionData;
   isTWD: boolean;
+  twdRate: number;
   lang: Lang;
 }
 
-function KPICard({ regionLabel, metricType, pr, distribution, isTWD, lang }: KPICardProps) {
+function KPICard({ regionLabel, metricType, pr, distribution, isTWD, twdRate, lang }: KPICardProps) {
   const animatedPr = useAnimatedValue(pr);
   const xMark = Math.max(1, Math.round(animatedPr));
   const curve = metricType === 'income' ? INCOME_CURVE : NETWORTH_CURVE;
@@ -350,6 +396,11 @@ function KPICard({ regionLabel, metricType, pr, distribution, isTWD, lang }: KPI
           <div key={label} className="flex flex-col items-center gap-0.5">
             <span className="text-[9px] uppercase tracking-wider text-slate-500">{label}</span>
             <span className="tabular-nums text-[11px] text-slate-300">{fmt(value)}</span>
+            {!isTWD && (
+              <span className="tabular-nums text-[9px] text-slate-600">
+                ≈{fmtTWD(value * twdRate)}
+              </span>
+            )}
           </div>
         ))}
       </div>
@@ -359,7 +410,7 @@ function KPICard({ regionLabel, metricType, pr, distribution, isTWD, lang }: KPI
 
 // ── Distribution Explorer ─────────────────────────────────────────────────────
 
-function DistributionExplorer({ defaultAge, lang }: { defaultAge: AgeBracket; lang: Lang }) {
+function DistributionExplorer({ defaultAge, lang, twdRate }: { defaultAge: AgeBracket; lang: Lang; twdRate: number }) {
   const [age, setAge] = useState<AgeBracket>(defaultAge);
   const [metric, setMetric] = useState<ExplorerMetric>('Annual_Income');
   const [region, setRegion] = useState<Region>('Taiwan');
@@ -370,6 +421,9 @@ function DistributionExplorer({ defaultAge, lang }: { defaultAge: AgeBracket; la
     Taiwan: lang === 'zh' ? '台灣' : 'Taiwan',
     Advanced_Economies: lang === 'zh' ? '先進經濟體' : 'Advanced Economies',
     Global: lang === 'zh' ? '全球' : 'Global',
+    Hong_Kong: lang === 'zh' ? '香港' : 'Hong Kong',
+    Singapore: lang === 'zh' ? '新加坡' : 'Singapore',
+    Japan: lang === 'zh' ? '日本' : 'Japan',
   };
 
   const bd = data[region]?.[age];
@@ -404,7 +458,7 @@ function DistributionExplorer({ defaultAge, lang }: { defaultAge: AgeBracket; la
       <div className="mb-5 flex flex-col gap-2">
         <div className="flex flex-wrap gap-2">
           <div className="flex overflow-hidden rounded-lg border border-slate-700">
-            {REGIONS.map((r) => (
+            {ALL_REGIONS.map((r) => (
               <button key={r} onClick={() => setRegion(r)}
                 className={`px-3 py-1.5 text-xs transition-colors ${region === r ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`}>
                 {regionLabels[r]}
@@ -439,7 +493,9 @@ function DistributionExplorer({ defaultAge, lang }: { defaultAge: AgeBracket; la
             {metricLabel} — {lang === 'zh' ? `${age} 歲` : `Age ${age}`} — {regionLabels[region]}
           </p>
           <p className="mb-4 text-[11px] text-slate-600">
-            {lang === 'zh' ? `數值單位：${currency}。游標移至長條可查看詳情。` : `Values in ${currency}. Hover bars for details.`}
+            {lang === 'zh'
+              ? `數值單位：${currency}${!isTWD ? `（1 USD ≈ ${twdRate} TWD）` : ''}。游標移至長條可查看詳情。`
+              : `Values in ${currency}${!isTWD ? ` (1 USD ≈ ${twdRate} TWD)` : ''}. Hover bars for details.`}
           </p>
 
           <ResponsiveContainer width="100%" height={200}>
@@ -457,6 +513,9 @@ function DistributionExplorer({ defaultAge, lang }: { defaultAge: AgeBracket; la
                         {d.label} — {lang === 'zh' ? `第 ${d.pct} 百分位` : `${d.pct}th percentile`}
                       </p>
                       <p className="text-blue-300">{fmt(d.value)} {currency}</p>
+                      {!isTWD && (
+                        <p className="text-slate-500">≈ {fmtTWD(d.value * twdRate)} TWD</p>
+                      )}
                     </div>
                   );
                 }}
@@ -497,15 +556,12 @@ export default function PRDashboard() {
   const [income, setIncome] = useState<number>(600000);
   const [netWorth, setNetWorth] = useState<number>(2500000);
   const [mode, setMode] = useState<ComparisonMode>('same-age');
-  const [results, setResults] = useState<PRResults | null>(() =>
-    computeResults('30-34', 600000, 2500000, 'same-age', DEFAULT_RATE)
-  );
+  const [results, setResults] = useState<PRResults | null>(null);
   const [noData, setNoData] = useState(false);
   const [shareStatus, setShareStatus] = useState<ShareStatus>('idle');
   const [targetPR, setTargetPR] = useState(90);
   const [reverseMode, setReverseMode] = useState<ComparisonMode>('same-age');
 
-  // Live exchange rate
   const [twdRate, setTwdRate] = useState(DEFAULT_RATE);
   const [rateLive, setRateLive] = useState(false);
 
@@ -522,7 +578,6 @@ export default function PRDashboard() {
       .catch(() => {});
   }, []);
 
-  // Read URL params after hydration
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const ageParam = params.get('age') as AgeBracket | null;
@@ -569,7 +624,6 @@ export default function PRDashboard() {
         return;
       }
 
-      // Desktop: download image
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = 'wealth-rank.png';
@@ -579,7 +633,7 @@ export default function PRDashboard() {
       setTimeout(() => setShareStatus('idle'), 2500);
       return;
     } catch {
-      // Share cancelled — fall through
+      // Share cancelled
     }
 
     navigator.clipboard.writeText(url).catch(() => {});
@@ -596,12 +650,35 @@ export default function PRDashboard() {
     Taiwan: lang === 'zh' ? '台灣' : 'Taiwan',
     Advanced_Economies: lang === 'zh' ? '先進經濟體' : 'Advanced Economies',
     Global: lang === 'zh' ? '全球' : 'Global',
+    Hong_Kong: lang === 'zh' ? '香港' : 'Hong Kong',
+    Singapore: lang === 'zh' ? '新加坡' : 'Singapore',
+    Japan: lang === 'zh' ? '日本' : 'Japan',
   };
 
   const shareLabel =
     shareStatus === 'downloaded' ? (lang === 'zh' ? '已下載' : 'Downloaded') :
     shareStatus === 'copied'     ? (lang === 'zh' ? '已複製' : 'Copied') :
     (lang === 'zh' ? '分享' : 'Share');
+
+  const renderKPIRow = (regions: Region[], metric: 'income' | 'networth') =>
+    regions.map((region) => {
+      if (!results) return null;
+      const metricKey: MetricType = metric === 'income' ? 'Annual_Income' : 'Net_Worth';
+      const dist = data[region]?.[activeBracket]?.[metricKey];
+      if (!dist) return null;
+      return (
+        <KPICard
+          key={region}
+          regionLabel={regionLabels[region]}
+          metricType={metric}
+          pr={results[region][metric === 'income' ? 'income' : 'netWorth']}
+          distribution={dist}
+          isTWD={region === 'Taiwan'}
+          twdRate={twdRate}
+          lang={lang}
+        />
+      );
+    });
 
   return (
     <main className="mx-auto min-h-screen max-w-5xl bg-slate-900 px-4 py-10 text-slate-100 sm:px-6 sm:py-14">
@@ -612,7 +689,7 @@ export default function PRDashboard() {
             {lang === 'zh' ? '財富與收入百分位計算機' : 'Wealth & Income Percentile Calculator'}
           </h1>
           <p className="mt-1 text-sm text-slate-400">
-            {lang === 'zh' ? '台灣 · 先進經濟體 · 全球' : 'Taiwan · Advanced Economies · Global'}
+            {lang === 'zh' ? '台灣 · 先進經濟體 · 全球 · 亞洲同儕' : 'Taiwan · Advanced Economies · Global · Asia Peers'}
           </p>
         </div>
         <div className="flex shrink-0 overflow-hidden rounded-lg border border-slate-700">
@@ -673,39 +750,37 @@ export default function PRDashboard() {
         <>
           {/* Annual Income */}
           <section className="mb-10">
-            <h2 className="mb-4 text-[10px] uppercase tracking-[0.15em] text-slate-500">
+            <h2 className="mb-4 flex items-center text-[10px] uppercase tracking-[0.15em] text-slate-500">
               {lang === 'zh' ? '年收入排名' : 'Annual Income Rank'}
               <span className="ml-2 normal-case text-slate-600">— {modeLabel}</span>
+              <InfoTooltip lang={lang} />
             </h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              {REGIONS.map((region) => {
-                const dist = data[region]?.[activeBracket]?.Annual_Income;
-                if (!dist) return null;
-                return (
-                  <KPICard key={region} regionLabel={regionLabels[region]} metricType="income"
-                    pr={results[`${region}_Income` as keyof PRResults]}
-                    distribution={dist} isTWD={region === 'Taiwan'} lang={lang} />
-                );
-              })}
+              {renderKPIRow(GLOBAL_REGIONS, 'income')}
+            </div>
+            <p className="mt-3 text-[10px] uppercase tracking-[0.15em] text-slate-600">
+              {lang === 'zh' ? '亞洲同儕' : 'Asia Peers'}
+            </p>
+            <div className="mt-2 grid grid-cols-1 gap-4 sm:grid-cols-3">
+              {renderKPIRow(ASIA_REGIONS, 'income')}
             </div>
           </section>
 
           {/* Net Worth */}
           <section className="mb-10">
-            <h2 className="mb-4 text-[10px] uppercase tracking-[0.15em] text-slate-500">
+            <h2 className="mb-4 flex items-center text-[10px] uppercase tracking-[0.15em] text-slate-500">
               {lang === 'zh' ? '淨資產排名' : 'Net Worth Rank'}
               <span className="ml-2 normal-case text-slate-600">— {modeLabel}</span>
+              <InfoTooltip lang={lang} />
             </h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              {REGIONS.map((region) => {
-                const dist = data[region]?.[activeBracket]?.Net_Worth;
-                if (!dist) return null;
-                return (
-                  <KPICard key={region} regionLabel={regionLabels[region]} metricType="networth"
-                    pr={results[`${region}_NetWorth` as keyof PRResults]}
-                    distribution={dist} isTWD={region === 'Taiwan'} lang={lang} />
-                );
-              })}
+              {renderKPIRow(GLOBAL_REGIONS, 'networth')}
+            </div>
+            <p className="mt-3 text-[10px] uppercase tracking-[0.15em] text-slate-600">
+              {lang === 'zh' ? '亞洲同儕' : 'Asia Peers'}
+            </p>
+            <div className="mt-2 grid grid-cols-1 gap-4 sm:grid-cols-3">
+              {renderKPIRow(ASIA_REGIONS, 'networth')}
             </div>
           </section>
 
@@ -753,15 +828,22 @@ export default function PRDashboard() {
                 return (
                   <div key={metricKey} className="rounded-xl border border-slate-700 bg-slate-800 p-5">
                     <p className="mb-3 text-[10px] uppercase tracking-[0.15em] text-slate-400">{label}</p>
-                    {REGIONS.map((region) => {
+                    {ALL_REGIONS.map((region) => {
                       const dist = data[region]?.[reverseBracket]?.[metricKey];
                       if (!dist) return null;
                       const raw = inversePR(targetPR, dist);
-                      const display = region === 'Taiwan' ? `${fmtTWD(raw)} TWD` : `${fmtUSD(raw)} USD`;
+                      const isTWD = region === 'Taiwan';
+                      const display = isTWD
+                        ? `${fmtTWD(raw)} TWD`
+                        : `${fmtUSD(raw)} USD`;
+                      const twdHint = !isTWD ? ` ≈ ${fmtTWD(raw * twdRate)} TWD` : '';
                       return (
                         <div key={region} className="flex items-center justify-between border-b border-slate-700/40 py-1.5 last:border-0">
                           <span className="text-xs text-slate-400">{regionLabels[region]}</span>
-                          <span className="tabular-nums text-xs text-blue-300">{display}</span>
+                          <span className="tabular-nums text-xs text-blue-300">
+                            {display}
+                            {twdHint && <span className="ml-1.5 text-[10px] text-slate-600">{twdHint}</span>}
+                          </span>
                         </div>
                       );
                     })}
@@ -774,7 +856,7 @@ export default function PRDashboard() {
       )}
 
       {/* Distribution Explorer */}
-      <DistributionExplorer defaultAge={age} lang={lang} />
+      <DistributionExplorer defaultAge={age} lang={lang} twdRate={twdRate} />
 
       {/* Footer */}
       <footer className="mt-16 border-t border-slate-800 pb-10 pt-6">
@@ -787,6 +869,7 @@ export default function PRDashboard() {
             台灣財富數據來自<span className="text-slate-400">主計總處家庭財富調查 2022</span>（家庭十分位：P10 = 143萬、P50 = 894萬、P90 = 3,391萬台幣），
             原始為<span className="text-slate-400">家戶單位</span>，已依平均家庭人口數（約 2.5 人）換算為<span className="text-slate-400">個人估計值</span>，此換算屬近似值。
             先進經濟體來自<span className="text-slate-400">OECD 2023</span>。全球來自<span className="text-slate-400">瑞士信貸全球財富報告 2023</span>及世界銀行（USD）。
+            香港、新加坡、日本數據來自各地統計局及<span className="text-slate-400">Credit Suisse 2023</span>（USD，近似值）。
             所有數值僅供相對排名參考。
             匯率：1 USD = {twdRate} TWD
             {rateLive ? <span className="ml-1 text-green-600">（即時）</span> : <span className="ml-1 text-slate-600">（靜態估算）</span>}。
@@ -798,6 +881,7 @@ export default function PRDashboard() {
             scaled ÷2.5 (avg. household size) to approximate <span className="text-slate-400">per-individual figures</span>.
             Advanced Economies from <span className="text-slate-400">OECD 2023</span>.
             Global from <span className="text-slate-400">Credit Suisse Global Wealth Report 2023</span> &amp; World Bank (USD).
+            HK, SG, JP from national statistics agencies &amp; <span className="text-slate-400">Credit Suisse 2023</span> (USD, approximate).
             All values are approximations for relative benchmarking only.
             Exchange rate: 1 USD = {twdRate} TWD
             {rateLive ? <span className="ml-1 text-green-600">(live)</span> : <span className="ml-1 text-slate-600">(static fallback)</span>}.
