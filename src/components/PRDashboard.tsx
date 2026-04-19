@@ -14,7 +14,7 @@ import {
   Tooltip,
   Cell,
 } from 'recharts';
-import { calculatePR } from '@/lib/calcEngine';
+import { calculatePR, inversePR } from '@/lib/calcEngine';
 import rawData from '@/data/mock_data.json';
 import type {
   AllRegionsData,
@@ -25,7 +25,7 @@ import type {
 } from '@/types/distribution';
 
 const data = rawData as AllRegionsData;
-const TWD_TO_USD = 32;
+const DEFAULT_RATE = 32;
 
 const DATA_BRACKETS: AgeBracket[] = [
   '20-24', '25-29', '30-34', '35-39', '40-44',
@@ -36,6 +36,7 @@ const REGIONS: Region[] = ['Taiwan', 'Advanced_Economies', 'Global'];
 type Lang = 'zh' | 'en';
 type ComparisonMode = 'same-age' | 'all-ages';
 type ExplorerMetric = MetricType;
+type ShareStatus = 'idle' | 'downloaded' | 'copied';
 
 // ── Curve shapes ──────────────────────────────────────────────────────────────
 
@@ -57,6 +58,37 @@ const NETWORTH_CURVE = Array.from({ length: 100 }, (_, i) => ({
   y: logNormalPDF(i + 1, 4.0, 1.0),
 }));
 
+// ── Animated number hook ──────────────────────────────────────────────────────
+
+function useAnimatedValue(target: number, duration = 500): number {
+  const [display, setDisplay] = useState(target);
+  const fromRef = useRef(target);
+  const rafRef = useRef<number>(0);
+
+  useEffect(() => {
+    const from = fromRef.current;
+    if (from === target) return;
+    const startTime = performance.now();
+
+    const animate = (now: number) => {
+      const t = Math.min((now - startTime) / duration, 1);
+      const ease = 1 - Math.pow(1 - t, 3);
+      setDisplay(from + (target - from) * ease);
+      if (t < 1) {
+        rafRef.current = requestAnimationFrame(animate);
+      } else {
+        fromRef.current = target;
+      }
+    };
+
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [target, duration]);
+
+  return display;
+}
+
 // ── Formatters ────────────────────────────────────────────────────────────────
 
 function fmtTWD(v: number): string {
@@ -64,13 +96,13 @@ function fmtTWD(v: number): string {
   if (v >= 10_000_000) return `${(v / 10_000_000).toFixed(1)}千萬`;
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
   if (v >= 1000) return `${Math.round(v / 1000)}k`;
-  return v === 0 ? '0' : v.toString();
+  return v === 0 ? '0' : Math.round(v).toString();
 }
 
 function fmtUSD(v: number): string {
   if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
   if (v >= 1000) return `$${Math.round(v / 1000)}k`;
-  return v === 0 ? '$0' : `$${v}`;
+  return v === 0 ? '$0' : `$${Math.round(v)}`;
 }
 
 // ── Formatted number input ────────────────────────────────────────────────────
@@ -104,15 +136,9 @@ function NumericInput({ value, onChange, step = 10000 }: NumericInputProps) {
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      onChange(value + step);
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      onChange(Math.max(0, value - step));
-    } else if (e.key === 'Enter') {
-      inputRef.current?.blur();
-    }
+    if (e.key === 'ArrowUp') { e.preventDefault(); onChange(value + step); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); onChange(Math.max(0, value - step)); }
+    else if (e.key === 'Enter') { inputRef.current?.blur(); }
   }
 
   return (
@@ -147,7 +173,8 @@ function computeResults(
   age: AgeBracket,
   income: number,
   netWorth: number,
-  mode: ComparisonMode
+  mode: ComparisonMode,
+  twdRate: number
 ): PRResults | null {
   const bracket: AgeBracket = mode === 'all-ages' ? 'all' : age;
   const out: Partial<PRResults> = {};
@@ -156,13 +183,107 @@ function computeResults(
     const bd = data[region]?.[bracket];
     if (!bd) return null;
 
-    const incVal = region === 'Taiwan' ? income : income / TWD_TO_USD;
-    const nwVal = region === 'Taiwan' ? netWorth : netWorth / TWD_TO_USD;
+    const incVal = region === 'Taiwan' ? income : income / twdRate;
+    const nwVal = region === 'Taiwan' ? netWorth : netWorth / twdRate;
 
     out[`${region}_Income` as keyof PRResults] = calculatePR(incVal, bd.Annual_Income);
     out[`${region}_NetWorth` as keyof PRResults] = calculatePR(nwVal, bd.Net_Worth);
   }
   return out as PRResults;
+}
+
+// ── Share image generator ─────────────────────────────────────────────────────
+
+async function generateShareImage(
+  results: PRResults,
+  age: AgeBracket,
+  mode: ComparisonMode,
+  lang: Lang,
+  host: string
+): Promise<Blob> {
+  const W = 640, H = 360;
+  const canvas = document.createElement('canvas');
+  canvas.width = W * 2;
+  canvas.height = H * 2;
+  const ctx = canvas.getContext('2d')!;
+  ctx.scale(2, 2);
+
+  const font = (size: number, weight = 400) =>
+    `${weight} ${size}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#1d4ed8';
+  ctx.fillRect(0, 0, 4, H);
+
+  ctx.fillStyle = '#f1f5f9';
+  ctx.font = font(17, 600);
+  ctx.fillText(lang === 'zh' ? '財富與收入百分位計算機' : 'Wealth & Income Percentile Calculator', 28, 42);
+
+  ctx.fillStyle = '#64748b';
+  ctx.font = font(12);
+  const sub = mode === 'same-age'
+    ? (lang === 'zh' ? `${age} 歲 · 同年齡層比較` : `Age ${age} · Same Age Group`)
+    : (lang === 'zh' ? `${age} 歲 · 全體比較` : `Age ${age} · All Ages`);
+  ctx.fillText(sub, 28, 62);
+
+  const sep = (y: number) => {
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(28, y); ctx.lineTo(W - 28, y); ctx.stroke();
+  };
+  sep(76);
+
+  const regionLabels = lang === 'zh' ? ['台灣', '先進經濟體', '全球'] : ['Taiwan', 'Adv. Econ.', 'Global'];
+  const cols = [28, 232, 436];
+
+  const drawRow = (sectionLabel: string, keys: (keyof PRResults)[], yBase: number) => {
+    ctx.fillStyle = '#475569';
+    ctx.font = font(9, 600);
+    ctx.fillText(sectionLabel.toUpperCase(), 28, yBase + 14);
+
+    keys.forEach((key, i) => {
+      const pr = results[key];
+      const x = cols[i];
+      ctx.fillStyle = '#475569';
+      ctx.font = font(10);
+      ctx.fillText(regionLabels[i], x, yBase + 34);
+      ctx.fillStyle = '#60a5fa';
+      ctx.font = font(34, 300);
+      ctx.fillText(pr.toFixed(1), x, yBase + 72);
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = font(11);
+      ctx.fillText(
+        lang === 'zh' ? `前 ${(100 - pr).toFixed(1)}%` : `Top ${(100 - pr).toFixed(1)}%`,
+        x, yBase + 90
+      );
+    });
+  };
+
+  drawRow(
+    lang === 'zh' ? '年收入排名' : 'Annual Income Rank',
+    ['Taiwan_Income', 'Advanced_Economies_Income', 'Global_Income'],
+    86
+  );
+  sep(190);
+  drawRow(
+    lang === 'zh' ? '淨資產排名' : 'Net Worth Rank',
+    ['Taiwan_NetWorth', 'Advanced_Economies_NetWorth', 'Global_NetWorth'],
+    200
+  );
+  sep(302);
+
+  ctx.fillStyle = '#334155';
+  ctx.font = font(10);
+  ctx.fillText(host, 28, 322);
+  ctx.fillStyle = '#1e293b';
+  ctx.font = font(9);
+  ctx.fillText(
+    lang === 'zh' ? '資料：DGBAS 2023 · OECD 2023 · Credit Suisse 2023' : 'Data: DGBAS 2023 · OECD 2023 · Credit Suisse 2023',
+    28, 340
+  );
+
+  return new Promise((resolve) => canvas.toBlob((b) => resolve(b!), 'image/png'));
 }
 
 // ── KPI Card ──────────────────────────────────────────────────────────────────
@@ -177,10 +298,11 @@ interface KPICardProps {
 }
 
 function KPICard({ regionLabel, metricType, pr, distribution, isTWD, lang }: KPICardProps) {
-  const xMark = Math.max(1, Math.round(pr));
+  const animatedPr = useAnimatedValue(pr);
+  const xMark = Math.max(1, Math.round(animatedPr));
   const curve = metricType === 'income' ? INCOME_CURVE : NETWORTH_CURVE;
   const fmt = isTWD ? fmtTWD : fmtUSD;
-  const topPct = (100 - pr).toFixed(1);
+  const topPct = (100 - animatedPr).toFixed(1);
 
   const anchors = [
     { label: 'P25', value: distribution.p25 },
@@ -194,7 +316,7 @@ function KPICard({ regionLabel, metricType, pr, distribution, isTWD, lang }: KPI
 
       <div className="flex items-baseline gap-2">
         <span className="tabular-nums text-[2.5rem] font-light leading-none text-blue-400">
-          {pr.toFixed(1)}
+          {animatedPr.toFixed(1)}
         </span>
         <span className="text-xs text-slate-500">/ 100</span>
         <span className="ml-auto rounded-md bg-slate-700/60 px-2 py-0.5 text-xs text-slate-300">
@@ -242,10 +364,7 @@ function DistributionExplorer({ defaultAge, lang }: { defaultAge: AgeBracket; la
   const [metric, setMetric] = useState<ExplorerMetric>('Annual_Income');
   const [region, setRegion] = useState<Region>('Taiwan');
 
-  // Bug 1 fix: sync Explorer age whenever parent age changes
-  useEffect(() => {
-    setAge(defaultAge);
-  }, [defaultAge]);
+  useEffect(() => { setAge(defaultAge); }, [defaultAge]);
 
   const regionLabels: Record<Region, string> = {
     Taiwan: lang === 'zh' ? '台灣' : 'Taiwan',
@@ -283,56 +402,30 @@ function DistributionExplorer({ defaultAge, lang }: { defaultAge: AgeBracket; la
       </h2>
 
       <div className="mb-5 flex flex-col gap-2">
-        {/* Region + Metric — wrap on small screens */}
         <div className="flex flex-wrap gap-2">
           <div className="flex overflow-hidden rounded-lg border border-slate-700">
             {REGIONS.map((r) => (
-              <button
-                key={r}
-                onClick={() => setRegion(r)}
-                className={`px-3 py-1.5 text-xs transition-colors ${
-                  region === r
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
+              <button key={r} onClick={() => setRegion(r)}
+                className={`px-3 py-1.5 text-xs transition-colors ${region === r ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`}>
                 {regionLabels[r]}
               </button>
             ))}
           </div>
-
           <div className="flex overflow-hidden rounded-lg border border-slate-700">
             {(['Annual_Income', 'Net_Worth'] as ExplorerMetric[]).map((m) => (
-              <button
-                key={m}
-                onClick={() => setMetric(m)}
-                className={`px-3 py-1.5 text-xs transition-colors ${
-                  metric === m
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {m === 'Annual_Income'
-                  ? (lang === 'zh' ? '年收入' : 'Annual Income')
-                  : (lang === 'zh' ? '淨資產' : 'Net Worth')}
+              <button key={m} onClick={() => setMetric(m)}
+                className={`px-3 py-1.5 text-xs transition-colors ${metric === m ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`}>
+                {m === 'Annual_Income' ? (lang === 'zh' ? '年收入' : 'Annual Income') : (lang === 'zh' ? '淨資產' : 'Net Worth')}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Age brackets — horizontally scrollable on mobile */}
         <div className="overflow-x-auto rounded-lg border border-slate-700">
           <div className="flex min-w-max">
             {DATA_BRACKETS.map((b) => (
-              <button
-                key={b}
-                onClick={() => setAge(b)}
-                className={`px-3 py-1.5 text-xs transition-colors ${
-                  age === b
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
+              <button key={b} onClick={() => setAge(b)}
+                className={`px-3 py-1.5 text-xs transition-colors ${age === b ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`}>
                 {b}
               </button>
             ))}
@@ -343,24 +436,15 @@ function DistributionExplorer({ defaultAge, lang }: { defaultAge: AgeBracket; la
       {dist ? (
         <div className="rounded-xl border border-slate-700 bg-slate-800 p-5">
           <p className="mb-1 text-xs text-slate-400">
-            {metricLabel} —{' '}
-            {lang === 'zh' ? `${age} 歲` : `Age ${age}`} —{' '}
-            {regionLabels[region]}
+            {metricLabel} — {lang === 'zh' ? `${age} 歲` : `Age ${age}`} — {regionLabels[region]}
           </p>
           <p className="mb-4 text-[11px] text-slate-600">
-            {lang === 'zh'
-              ? `數值單位：${currency}。游標移至長條可查看詳情。`
-              : `Values in ${currency}. Hover bars for details.`}
+            {lang === 'zh' ? `數值單位：${currency}。游標移至長條可查看詳情。` : `Values in ${currency}. Hover bars for details.`}
           </p>
 
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={chartData} margin={{ top: 16, right: 8, bottom: 0, left: 8 }}>
-              <XAxis
-                dataKey="label"
-                tick={{ fill: '#94a3b8', fontSize: 11 }}
-                axisLine={false}
-                tickLine={false}
-              />
+              <XAxis dataKey="label" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
               <YAxis hide />
               <Tooltip
                 cursor={{ fill: 'rgba(255,255,255,0.04)' }}
@@ -370,147 +454,30 @@ function DistributionExplorer({ defaultAge, lang }: { defaultAge: AgeBracket; la
                   return (
                     <div className="rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-xs">
                       <p className="font-medium text-slate-200">
-                        {d.label} —{' '}
-                        {lang === 'zh' ? `第 ${d.pct} 百分位` : `${d.pct}th percentile`}
+                        {d.label} — {lang === 'zh' ? `第 ${d.pct} 百分位` : `${d.pct}th percentile`}
                       </p>
-                      <p className="text-blue-300">
-                        {fmt(d.value)} {currency}
-                      </p>
+                      <p className="text-blue-300">{fmt(d.value)} {currency}</p>
                     </div>
                   );
                 }}
               />
               <Bar dataKey="value" radius={[4, 4, 0, 0]} isAnimationActive={false}>
-                {chartData.map((entry, i) => (
-                  <Cell key={entry.label} fill={barColors[i]} />
-                ))}
+                {chartData.map((entry, i) => <Cell key={entry.label} fill={barColors[i]} />)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
 
           <div className="mt-1 grid grid-cols-7 gap-1 text-center">
             {chartData.map((d) => (
-              <span key={d.label} className="tabular-nums text-[10px] text-blue-300">
-                {fmt(d.value)}
-              </span>
+              <span key={d.label} className="tabular-nums text-[10px] text-blue-300">{fmt(d.value)}</span>
             ))}
           </div>
         </div>
       ) : (
-        <p className="text-sm text-slate-500">
-          {lang === 'zh' ? '此選項暫無數據' : 'No data for this selection.'}
-        </p>
+        <p className="text-sm text-slate-500">{lang === 'zh' ? '此選項暫無數據' : 'No data for this selection.'}</p>
       )}
     </section>
   );
-}
-
-// ── Share image generator ─────────────────────────────────────────────────────
-
-async function generateShareImage(
-  results: PRResults,
-  age: AgeBracket,
-  mode: ComparisonMode,
-  lang: Lang,
-  host: string
-): Promise<Blob> {
-  const W = 640, H = 360;
-  const canvas = document.createElement('canvas');
-  canvas.width = W * 2;
-  canvas.height = H * 2;
-  const ctx = canvas.getContext('2d')!;
-  ctx.scale(2, 2);
-
-  const font = (size: number, weight = 400) =>
-    `${weight} ${size}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
-
-  // Background + left accent bar
-  ctx.fillStyle = '#0f172a';
-  ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = '#1d4ed8';
-  ctx.fillRect(0, 0, 4, H);
-
-  // Title
-  ctx.fillStyle = '#f1f5f9';
-  ctx.font = font(17, 600);
-  ctx.fillText(
-    lang === 'zh' ? '財富與收入百分位計算機' : 'Wealth & Income Percentile Calculator',
-    28, 42
-  );
-
-  // Subtitle
-  ctx.fillStyle = '#64748b';
-  ctx.font = font(12);
-  const sub = mode === 'same-age'
-    ? (lang === 'zh' ? `${age} 歲 · 同年齡層比較` : `Age ${age} · Same Age Group`)
-    : (lang === 'zh' ? `${age} 歲 · 全體比較` : `Age ${age} · All Ages`);
-  ctx.fillText(sub, 28, 62);
-
-  const sep = (y: number) => {
-    ctx.strokeStyle = '#1e293b';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(28, y); ctx.lineTo(W - 28, y); ctx.stroke();
-  };
-  sep(76);
-
-  const regionLabels = lang === 'zh'
-    ? ['台灣', '先進經濟體', '全球']
-    : ['Taiwan', 'Adv. Econ.', 'Global'];
-  const cols = [28, 232, 436];
-
-  const drawRow = (sectionLabel: string, keys: (keyof PRResults)[], yBase: number) => {
-    ctx.fillStyle = '#475569';
-    ctx.font = font(9, 600);
-    ctx.fillText(sectionLabel.toUpperCase(), 28, yBase + 14);
-
-    keys.forEach((key, i) => {
-      const pr = results[key];
-      const x = cols[i];
-
-      ctx.fillStyle = '#475569';
-      ctx.font = font(10);
-      ctx.fillText(regionLabels[i], x, yBase + 34);
-
-      ctx.fillStyle = '#60a5fa';
-      ctx.font = font(34, 300);
-      ctx.fillText(pr.toFixed(1), x, yBase + 72);
-
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = font(11);
-      ctx.fillText(
-        lang === 'zh' ? `前 ${(100 - pr).toFixed(1)}%` : `Top ${(100 - pr).toFixed(1)}%`,
-        x, yBase + 90
-      );
-    });
-  };
-
-  drawRow(
-    lang === 'zh' ? '年收入排名' : 'Annual Income Rank',
-    ['Taiwan_Income', 'Advanced_Economies_Income', 'Global_Income'],
-    86
-  );
-  sep(190);
-  drawRow(
-    lang === 'zh' ? '淨資產排名' : 'Net Worth Rank',
-    ['Taiwan_NetWorth', 'Advanced_Economies_NetWorth', 'Global_NetWorth'],
-    200
-  );
-  sep(302);
-
-  // Footer
-  ctx.fillStyle = '#334155';
-  ctx.font = font(10);
-  ctx.fillText(host, 28, 322);
-  ctx.fillStyle = '#1e293b';
-  ctx.font = font(9);
-  ctx.fillText(
-    lang === 'zh'
-      ? '資料：DGBAS 2023 · OECD 2023 · Credit Suisse 2023'
-      : 'Data: DGBAS 2023 · OECD 2023 · Credit Suisse 2023',
-    28, 340
-  );
-
-  return new Promise((resolve) => canvas.toBlob((b) => resolve(b!), 'image/png'));
 }
 
 // ── Shared styles ──────────────────────────────────────────────────────────────
@@ -531,12 +498,30 @@ export default function PRDashboard() {
   const [netWorth, setNetWorth] = useState<number>(2500000);
   const [mode, setMode] = useState<ComparisonMode>('same-age');
   const [results, setResults] = useState<PRResults | null>(() =>
-    computeResults('30-34', 600000, 2500000, 'same-age')
+    computeResults('30-34', 600000, 2500000, 'same-age', DEFAULT_RATE)
   );
   const [noData, setNoData] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [shareStatus, setShareStatus] = useState<ShareStatus>('idle');
+  const [targetPR, setTargetPR] = useState(90);
 
-  // Read URL params after hydration (Bug 2: prevents SSR mismatch)
+  // Live exchange rate
+  const [twdRate, setTwdRate] = useState(DEFAULT_RATE);
+  const [rateLive, setRateLive] = useState(false);
+
+  useEffect(() => {
+    fetch('https://open.er-api.com/v6/latest/USD')
+      .then((r) => r.json())
+      .then((d) => {
+        const rate = d?.rates?.TWD;
+        if (typeof rate === 'number' && rate > 20 && rate < 50) {
+          setTwdRate(parseFloat(rate.toFixed(1)));
+          setRateLive(true);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // Read URL params after hydration
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const ageParam = params.get('age') as AgeBracket | null;
@@ -554,8 +539,8 @@ export default function PRDashboard() {
 
   const debouncedCompute = useMemo(
     () =>
-      debounce((a: AgeBracket, inc: number, nw: number, m: ComparisonMode) => {
-        const r = computeResults(a, inc, nw, m);
+      debounce((a: AgeBracket, inc: number, nw: number, m: ComparisonMode, rate: number) => {
+        const r = computeResults(a, inc, nw, m, rate);
         if (r) { setResults(r); setNoData(false); }
         else setNoData(true);
       }, 300),
@@ -563,18 +548,12 @@ export default function PRDashboard() {
   );
 
   useEffect(() => {
-    debouncedCompute(age, income, netWorth, mode);
+    debouncedCompute(age, income, netWorth, mode, twdRate);
     return () => debouncedCompute.cancel();
-  }, [age, income, netWorth, mode, debouncedCompute]);
+  }, [age, income, netWorth, mode, twdRate, debouncedCompute]);
 
   async function handleShare() {
-    const params = new URLSearchParams({
-      age,
-      income: income.toString(),
-      nw: netWorth.toString(),
-      mode,
-      lang,
-    });
+    const params = new URLSearchParams({ age, income: income.toString(), nw: netWorth.toString(), mode, lang });
     const url = `${window.location.origin}${window.location.pathname}?${params.toString()}`;
     window.history.replaceState(null, '', url);
 
@@ -584,13 +563,8 @@ export default function PRDashboard() {
       const blob = await generateShareImage(results, age, mode, lang, window.location.host);
       const file = new File([blob], 'wealth-rank.png', { type: 'image/png' });
 
-      // Mobile: native share sheet with image
       if (navigator.canShare?.({ files: [file] })) {
-        await navigator.share({
-          files: [file],
-          title: lang === 'zh' ? '我的財富百分位排名' : 'My Wealth Percentile Rank',
-          url,
-        });
+        await navigator.share({ files: [file], title: lang === 'zh' ? '我的財富百分位排名' : 'My Wealth Percentile Rank', url });
         return;
       }
 
@@ -600,26 +574,33 @@ export default function PRDashboard() {
       a.download = 'wealth-rank.png';
       a.click();
       URL.revokeObjectURL(a.href);
+      setShareStatus('downloaded');
+      setTimeout(() => setShareStatus('idle'), 2500);
+      return;
     } catch {
-      // Share cancelled — fall through to copy URL
+      // Share cancelled — fall through
     }
 
     navigator.clipboard.writeText(url).catch(() => {});
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setShareStatus('copied');
+    setTimeout(() => setShareStatus('idle'), 2500);
   }
 
   const activeBracket: AgeBracket = mode === 'all-ages' ? 'all' : age;
-  const modeLabel =
-    mode === 'same-age'
-      ? (lang === 'zh' ? `對比 ${age} 歲` : `vs. age ${age}`)
-      : (lang === 'zh' ? '對比全體' : 'vs. all ages');
+  const modeLabel = mode === 'same-age'
+    ? (lang === 'zh' ? `對比 ${age} 歲` : `vs. age ${age}`)
+    : (lang === 'zh' ? '對比全體' : 'vs. all ages');
 
   const regionLabels: Record<Region, string> = {
     Taiwan: lang === 'zh' ? '台灣' : 'Taiwan',
     Advanced_Economies: lang === 'zh' ? '先進經濟體' : 'Advanced Economies',
     Global: lang === 'zh' ? '全球' : 'Global',
   };
+
+  const shareLabel =
+    shareStatus === 'downloaded' ? (lang === 'zh' ? '已下載' : 'Downloaded') :
+    shareStatus === 'copied'     ? (lang === 'zh' ? '已複製' : 'Copied') :
+    (lang === 'zh' ? '分享' : 'Share');
 
   return (
     <main className="mx-auto min-h-screen max-w-5xl bg-slate-900 px-4 py-10 text-slate-100 sm:px-6 sm:py-14">
@@ -633,19 +614,10 @@ export default function PRDashboard() {
             {lang === 'zh' ? '台灣 · 先進經濟體 · 全球' : 'Taiwan · Advanced Economies · Global'}
           </p>
         </div>
-
-        {/* Language toggle */}
         <div className="flex shrink-0 overflow-hidden rounded-lg border border-slate-700">
           {(['zh', 'en'] as Lang[]).map((l) => (
-            <button
-              key={l}
-              onClick={() => setLang(l)}
-              className={`px-3 py-1.5 text-xs transition-colors ${
-                lang === l
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-              }`}
-            >
+            <button key={l} onClick={() => setLang(l)}
+              className={`px-3 py-1.5 text-xs transition-colors ${lang === l ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`}>
               {l === 'zh' ? '中文' : 'EN'}
             </button>
           ))}
@@ -656,26 +628,16 @@ export default function PRDashboard() {
       <section className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
         <div>
           <label className={labelCls}>{lang === 'zh' ? '年齡層' : 'Age Bracket'}</label>
-          <select
-            value={age}
-            onChange={(e) => setAge(e.target.value as AgeBracket)}
-            className={inputCls}
-          >
-            {DATA_BRACKETS.map((b) => (
-              <option key={b} value={b}>{b}</option>
-            ))}
+          <select value={age} onChange={(e) => setAge(e.target.value as AgeBracket)} className={inputCls}>
+            {DATA_BRACKETS.map((b) => <option key={b} value={b}>{b}</option>)}
           </select>
         </div>
         <div>
-          <label className={labelCls}>
-            {lang === 'zh' ? '年收入（台幣）' : 'Annual Income (TWD)'}
-          </label>
+          <label className={labelCls}>{lang === 'zh' ? '年收入（台幣）' : 'Annual Income (TWD)'}</label>
           <NumericInput value={income} onChange={setIncome} step={10000} />
         </div>
         <div>
-          <label className={labelCls}>
-            {lang === 'zh' ? '淨資產（台幣）' : 'Net Worth (TWD)'}
-          </label>
+          <label className={labelCls}>{lang === 'zh' ? '淨資產（台幣）' : 'Net Worth (TWD)'}</label>
           <NumericInput value={netWorth} onChange={setNetWorth} step={100000} />
         </div>
       </section>
@@ -687,33 +649,16 @@ export default function PRDashboard() {
         </span>
         <div className="flex overflow-hidden rounded-lg border border-slate-700">
           {(['same-age', 'all-ages'] as ComparisonMode[]).map((m) => (
-            <button
-              key={m}
-              onClick={() => setMode(m)}
-              className={`px-4 py-1.5 text-xs transition-colors ${
-                mode === m
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              {m === 'same-age'
-                ? (lang === 'zh' ? '同年齡層' : 'Same Age Group')
-                : (lang === 'zh' ? '全體' : 'All Ages')}
+            <button key={m} onClick={() => setMode(m)}
+              className={`px-4 py-1.5 text-xs transition-colors ${mode === m ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`}>
+              {m === 'same-age' ? (lang === 'zh' ? '同年齡層' : 'Same Age Group') : (lang === 'zh' ? '全體' : 'All Ages')}
             </button>
           ))}
         </div>
 
-        <button
-          onClick={handleShare}
-          className="ml-auto flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-4 py-1.5 text-xs text-slate-400 transition-colors hover:text-slate-200"
-        >
-          {copied ? (
-            <span className="text-green-400">
-              {lang === 'zh' ? '已複製' : 'Link copied'}
-            </span>
-          ) : (
-            <span>{lang === 'zh' ? '分享' : 'Share'}</span>
-          )}
+        <button onClick={handleShare}
+          className="ml-auto flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-4 py-1.5 text-xs transition-colors hover:text-slate-200">
+          <span className={shareStatus !== 'idle' ? 'text-green-400' : 'text-slate-400'}>{shareLabel}</span>
         </button>
       </div>
 
@@ -736,22 +681,16 @@ export default function PRDashboard() {
                 const dist = data[region]?.[activeBracket]?.Annual_Income;
                 if (!dist) return null;
                 return (
-                  <KPICard
-                    key={region}
-                    regionLabel={regionLabels[region]}
-                    metricType="income"
+                  <KPICard key={region} regionLabel={regionLabels[region]} metricType="income"
                     pr={results[`${region}_Income` as keyof PRResults]}
-                    distribution={dist}
-                    isTWD={region === 'Taiwan'}
-                    lang={lang}
-                  />
+                    distribution={dist} isTWD={region === 'Taiwan'} lang={lang} />
                 );
               })}
             </div>
           </section>
 
           {/* Net Worth */}
-          <section className="mb-4">
+          <section className="mb-10">
             <h2 className="mb-4 text-[10px] uppercase tracking-[0.15em] text-slate-500">
               {lang === 'zh' ? '淨資產排名' : 'Net Worth Rank'}
               <span className="ml-2 normal-case text-slate-600">— {modeLabel}</span>
@@ -761,17 +700,58 @@ export default function PRDashboard() {
                 const dist = data[region]?.[activeBracket]?.Net_Worth;
                 if (!dist) return null;
                 return (
-                  <KPICard
-                    key={region}
-                    regionLabel={regionLabels[region]}
-                    metricType="networth"
+                  <KPICard key={region} regionLabel={regionLabels[region]} metricType="networth"
                     pr={results[`${region}_NetWorth` as keyof PRResults]}
-                    distribution={dist}
-                    isTWD={region === 'Taiwan'}
-                    lang={lang}
-                  />
+                    distribution={dist} isTWD={region === 'Taiwan'} lang={lang} />
                 );
               })}
+            </div>
+          </section>
+
+          {/* Reverse Lookup */}
+          <section className="mb-10">
+            <h2 className="mb-4 text-[10px] uppercase tracking-[0.15em] text-slate-500">
+              {lang === 'zh' ? '反向查詢' : 'What You Need'}
+              <span className="ml-2 normal-case text-slate-600">
+                — {lang === 'zh' ? `達到前 ${100 - targetPR}%` : `To reach Top ${100 - targetPR}%`}
+              </span>
+            </h2>
+
+            <div className="mb-5 flex items-center gap-4">
+              <input
+                type="range" min={1} max={99} step={1}
+                value={targetPR}
+                onChange={(e) => setTargetPR(parseInt(e.target.value))}
+                className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-slate-700 accent-blue-500"
+              />
+              <span className="w-36 shrink-0 text-right text-sm tabular-nums text-slate-300">
+                {lang === 'zh' ? `第 ${targetPR} 百分位` : `${targetPR}th percentile`}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {[
+                { metricKey: 'Annual_Income' as MetricType, label: lang === 'zh' ? '年收入需求' : 'Income Required' },
+                { metricKey: 'Net_Worth' as MetricType, label: lang === 'zh' ? '淨資產需求' : 'Net Worth Required' },
+              ].map(({ metricKey, label }) => (
+                <div key={metricKey} className="rounded-xl border border-slate-700 bg-slate-800 p-5">
+                  <p className="mb-3 text-[10px] uppercase tracking-[0.15em] text-slate-400">{label}</p>
+                  {REGIONS.map((region) => {
+                    const dist = data[region]?.[activeBracket]?.[metricKey];
+                    if (!dist) return null;
+                    const raw = inversePR(targetPR, dist);
+                    const display = region === 'Taiwan'
+                      ? `${fmtTWD(raw)} TWD`
+                      : `${fmtUSD(raw)} USD`;
+                    return (
+                      <div key={region} className="flex items-center justify-between border-b border-slate-700/40 py-1.5 last:border-0">
+                        <span className="text-xs text-slate-400">{regionLabels[region]}</span>
+                        <span className="tabular-nums text-xs text-blue-300">{display}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
           </section>
         </>
@@ -780,47 +760,31 @@ export default function PRDashboard() {
       {/* Distribution Explorer */}
       <DistributionExplorer defaultAge={age} lang={lang} />
 
-      {/* Data source */}
+      {/* Footer */}
       <footer className="mt-16 border-t border-slate-800 pb-10 pt-6">
         <p className="mb-2 text-[10px] uppercase tracking-[0.15em] text-slate-600">
           {lang === 'zh' ? '資料來源與說明' : 'Data Source & Accuracy'}
         </p>
         {lang === 'zh' ? (
           <p className="text-[11px] leading-relaxed text-slate-500">
-            台灣收入數據來自{' '}
-            <span className="text-slate-400">行政院主計總處薪資中位數及分布統計 2023</span>
-            （受雇員工）。台灣財富數據來自{' '}
-            <span className="text-slate-400">主計總處家庭財富調查 2022</span>
-            （家庭十分位：P10 = 143萬、P50 = 894萬、P90 = 3,391萬台幣）。
-            原始數據以<span className="text-slate-400">家戶</span>為統計單位；
-            本工具已依台灣平均家庭人口數（約 2.5 人，2022 年人口普查）換算為
-            <span className="text-slate-400">個人估計值</span>，此換算屬近似值，實際分布可能有所差異。
-            先進經濟體數據來自{' '}
-            <span className="text-slate-400">OECD 所得分配資料 2023</span>（每位成人）。
-            全球數據來自{' '}
-            <span className="text-slate-400">瑞士信貸全球財富報告 2023</span>
-            及世界銀行估計（每位成人，單位 USD）。
+            台灣收入數據來自<span className="text-slate-400">行政院主計總處薪資中位數及分布統計 2023</span>（受雇員工）。
+            台灣財富數據來自<span className="text-slate-400">主計總處家庭財富調查 2022</span>（家庭十分位：P10 = 143萬、P50 = 894萬、P90 = 3,391萬台幣），
+            原始為<span className="text-slate-400">家戶單位</span>，已依平均家庭人口數（約 2.5 人）換算為<span className="text-slate-400">個人估計值</span>，此換算屬近似值。
+            先進經濟體來自<span className="text-slate-400">OECD 2023</span>。全球來自<span className="text-slate-400">瑞士信貸全球財富報告 2023</span>及世界銀行（USD）。
             所有數值僅供相對排名參考。
-            匯率採靜態 1 USD = {TWD_TO_USD} TWD，僅供估算。
+            匯率：1 USD = {twdRate} TWD
+            {rateLive ? <span className="ml-1 text-green-600">（即時）</span> : <span className="ml-1 text-slate-600">（靜態估算）</span>}。
           </p>
         ) : (
           <p className="text-[11px] leading-relaxed text-slate-500">
-            Taiwan income figures are derived from{' '}
-            <span className="text-slate-400">DGBAS 薪資中位數及分布統計 2023</span>
-            {' '}(employed workers). Taiwan wealth figures are estimated from the{' '}
-            <span className="text-slate-400">DGBAS household wealth survey 2022</span>
-            {' '}(household deciles: P10 = NT$1.43M, P50 = NT$8.94M, P90 = NT$33.91M).
-            The raw data is <span className="text-slate-400">household-level</span>;
-            {' '}values have been divided by ÷2.5 (average Taiwan household size, 2022 census)
-            to approximate <span className="text-slate-400">per-individual figures</span> — this
-            is an approximation and actual individual distributions may differ.
-            Advanced Economies figures are from{' '}
-            <span className="text-slate-400">OECD income distribution data 2023</span>{' '}
-            (per adult). Global figures are from the{' '}
-            <span className="text-slate-400">Credit Suisse Global Wealth Report 2023</span>
-            {' '}and World Bank estimates (per adult, USD).
+            Taiwan income from <span className="text-slate-400">DGBAS 薪資中位數及分布統計 2023</span> (employed workers).
+            Taiwan wealth from <span className="text-slate-400">DGBAS household wealth survey 2022</span> (P10 = NT$1.43M, P50 = NT$8.94M, P90 = NT$33.91M),
+            scaled ÷2.5 (avg. household size) to approximate <span className="text-slate-400">per-individual figures</span>.
+            Advanced Economies from <span className="text-slate-400">OECD 2023</span>.
+            Global from <span className="text-slate-400">Credit Suisse Global Wealth Report 2023</span> &amp; World Bank (USD).
             All values are approximations for relative benchmarking only.
-            Currency conversion: 1 USD = {TWD_TO_USD} TWD (static rate — estimation only).
+            Exchange rate: 1 USD = {twdRate} TWD
+            {rateLive ? <span className="ml-1 text-green-600">(live)</span> : <span className="ml-1 text-slate-600">(static fallback)</span>}.
           </p>
         )}
       </footer>

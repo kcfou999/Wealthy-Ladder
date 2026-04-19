@@ -120,3 +120,61 @@ export function calculatePR(
 function clamp(pr: number): number {
   return Math.min(99.99, Math.max(0, pr));
 }
+
+/**
+ * Inverse of calculatePR: given a target percentile rank, returns the value
+ * required to achieve it within the given distribution.
+ *
+ * Mirrors the three-regime logic of calculatePR exactly:
+ * - Below first positive anchor: linear
+ * - Between anchors: log-linear
+ * - Above P90: Pareto inverse
+ *
+ * @param pr - Target percentile rank (0–99.99).
+ * @param distribution - Percentile breakpoints for the relevant cohort/metric.
+ * @returns The value in the distribution's native currency.
+ */
+export function inversePR(pr: number, distribution: DistributionData): number {
+  const target = Math.min(Math.max(pr, 0), 99.99);
+  if (target <= 0) return 0;
+
+  const { p10, p25, p50, p75, p90, p99 } = distribution;
+
+  // Pareto inverse above P90
+  if (target >= 90) {
+    if (p99 <= p90) return p90;
+    const alpha = Math.log(0.1) / Math.log(p90 / p99);
+    const survival = 1 - (target - 90) / 10;
+    if (survival <= 0) return p99 * 100;
+    return p90 / Math.pow(survival, 1 / alpha);
+  }
+
+  // Build positive anchors (mirrors Regime 2 filter in calculatePR)
+  const positiveAnchors = [
+    { pct: 10, val: p10 },
+    { pct: 25, val: p25 },
+    { pct: 50, val: p50 },
+    { pct: 75, val: p75 },
+    { pct: 90, val: p90 },
+  ].filter((a) => a.val > 0);
+
+  if (positiveAnchors.length === 0) return 0;
+
+  // Below first positive anchor: linear from (0, 0%)
+  const first = positiveAnchors[0];
+  if (target <= first.pct) {
+    return (target / first.pct) * first.val;
+  }
+
+  // Log-linear between surrounding anchors
+  for (let i = 0; i < positiveAnchors.length - 1; i++) {
+    const lo = positiveAnchors[i];
+    const hi = positiveAnchors[i + 1];
+    if (target >= lo.pct && target <= hi.pct) {
+      const t = (target - lo.pct) / (hi.pct - lo.pct);
+      return Math.exp(Math.log(lo.val) + t * (Math.log(hi.val) - Math.log(lo.val)));
+    }
+  }
+
+  return p90;
+}
