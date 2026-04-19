@@ -405,6 +405,114 @@ function DistributionExplorer({ defaultAge, lang }: { defaultAge: AgeBracket; la
   );
 }
 
+// ── Share image generator ─────────────────────────────────────────────────────
+
+async function generateShareImage(
+  results: PRResults,
+  age: AgeBracket,
+  mode: ComparisonMode,
+  lang: Lang,
+  host: string
+): Promise<Blob> {
+  const W = 640, H = 360;
+  const canvas = document.createElement('canvas');
+  canvas.width = W * 2;
+  canvas.height = H * 2;
+  const ctx = canvas.getContext('2d')!;
+  ctx.scale(2, 2);
+
+  const font = (size: number, weight = 400) =>
+    `${weight} ${size}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+
+  // Background + left accent bar
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#1d4ed8';
+  ctx.fillRect(0, 0, 4, H);
+
+  // Title
+  ctx.fillStyle = '#f1f5f9';
+  ctx.font = font(17, 600);
+  ctx.fillText(
+    lang === 'zh' ? '財富與收入百分位計算機' : 'Wealth & Income Percentile Calculator',
+    28, 42
+  );
+
+  // Subtitle
+  ctx.fillStyle = '#64748b';
+  ctx.font = font(12);
+  const sub = mode === 'same-age'
+    ? (lang === 'zh' ? `${age} 歲 · 同年齡層比較` : `Age ${age} · Same Age Group`)
+    : (lang === 'zh' ? `${age} 歲 · 全體比較` : `Age ${age} · All Ages`);
+  ctx.fillText(sub, 28, 62);
+
+  const sep = (y: number) => {
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(28, y); ctx.lineTo(W - 28, y); ctx.stroke();
+  };
+  sep(76);
+
+  const regionLabels = lang === 'zh'
+    ? ['台灣', '先進經濟體', '全球']
+    : ['Taiwan', 'Adv. Econ.', 'Global'];
+  const cols = [28, 232, 436];
+
+  const drawRow = (sectionLabel: string, keys: (keyof PRResults)[], yBase: number) => {
+    ctx.fillStyle = '#475569';
+    ctx.font = font(9, 600);
+    ctx.fillText(sectionLabel.toUpperCase(), 28, yBase + 14);
+
+    keys.forEach((key, i) => {
+      const pr = results[key];
+      const x = cols[i];
+
+      ctx.fillStyle = '#475569';
+      ctx.font = font(10);
+      ctx.fillText(regionLabels[i], x, yBase + 34);
+
+      ctx.fillStyle = '#60a5fa';
+      ctx.font = font(34, 300);
+      ctx.fillText(pr.toFixed(1), x, yBase + 72);
+
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = font(11);
+      ctx.fillText(
+        lang === 'zh' ? `前 ${(100 - pr).toFixed(1)}%` : `Top ${(100 - pr).toFixed(1)}%`,
+        x, yBase + 90
+      );
+    });
+  };
+
+  drawRow(
+    lang === 'zh' ? '年收入排名' : 'Annual Income Rank',
+    ['Taiwan_Income', 'Advanced_Economies_Income', 'Global_Income'],
+    86
+  );
+  sep(190);
+  drawRow(
+    lang === 'zh' ? '淨資產排名' : 'Net Worth Rank',
+    ['Taiwan_NetWorth', 'Advanced_Economies_NetWorth', 'Global_NetWorth'],
+    200
+  );
+  sep(302);
+
+  // Footer
+  ctx.fillStyle = '#334155';
+  ctx.font = font(10);
+  ctx.fillText(host, 28, 322);
+  ctx.fillStyle = '#1e293b';
+  ctx.font = font(9);
+  ctx.fillText(
+    lang === 'zh'
+      ? '資料：DGBAS 2023 · OECD 2023 · Credit Suisse 2023'
+      : 'Data: DGBAS 2023 · OECD 2023 · Credit Suisse 2023',
+    28, 340
+  );
+
+  return new Promise((resolve) => canvas.toBlob((b) => resolve(b!), 'image/png'));
+}
+
 // ── Shared styles ──────────────────────────────────────────────────────────────
 
 const inputCls =
@@ -459,7 +567,7 @@ export default function PRDashboard() {
     return () => debouncedCompute.cancel();
   }, [age, income, netWorth, mode, debouncedCompute]);
 
-  function handleShare() {
+  async function handleShare() {
     const params = new URLSearchParams({
       age,
       income: income.toString(),
@@ -469,10 +577,36 @@ export default function PRDashboard() {
     });
     const url = `${window.location.origin}${window.location.pathname}?${params.toString()}`;
     window.history.replaceState(null, '', url);
-    navigator.clipboard.writeText(url).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+
+    if (!results) return;
+
+    try {
+      const blob = await generateShareImage(results, age, mode, lang, window.location.host);
+      const file = new File([blob], 'wealth-rank.png', { type: 'image/png' });
+
+      // Mobile: native share sheet with image
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: lang === 'zh' ? '我的財富百分位排名' : 'My Wealth Percentile Rank',
+          url,
+        });
+        return;
+      }
+
+      // Desktop: download image
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'wealth-rank.png';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      // Share cancelled — fall through to copy URL
+    }
+
+    navigator.clipboard.writeText(url).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   }
 
   const activeBracket: AgeBracket = mode === 'all-ages' ? 'all' : age;
