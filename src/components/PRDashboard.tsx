@@ -503,6 +503,7 @@ export default function PRDashboard() {
   const [noData, setNoData] = useState(false);
   const [shareStatus, setShareStatus] = useState<ShareStatus>('idle');
   const [targetPR, setTargetPR] = useState(90);
+  const [reverseMode, setReverseMode] = useState<ComparisonMode>('same-age');
 
   // Live exchange rate
   const [twdRate, setTwdRate] = useState(DEFAULT_RATE);
@@ -717,6 +718,20 @@ export default function PRDashboard() {
               </span>
             </h2>
 
+            <div className="mb-4 flex flex-wrap items-center gap-3">
+              <span className="text-[10px] uppercase tracking-[0.15em] text-slate-500">
+                {lang === 'zh' ? '比較對象' : 'Compare against'}
+              </span>
+              <div className="flex overflow-hidden rounded-lg border border-slate-700">
+                {(['same-age', 'all-ages'] as ComparisonMode[]).map((m) => (
+                  <button key={m} onClick={() => setReverseMode(m)}
+                    className={`px-3 py-1.5 text-xs transition-colors ${reverseMode === m ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`}>
+                    {m === 'same-age' ? (lang === 'zh' ? '同年齡層' : 'Same Age') : (lang === 'zh' ? '全體' : 'All Ages')}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="mb-5 flex items-center gap-4">
               <input
                 type="range" min={1} max={99} step={1}
@@ -733,25 +748,26 @@ export default function PRDashboard() {
               {[
                 { metricKey: 'Annual_Income' as MetricType, label: lang === 'zh' ? '年收入需求' : 'Income Required' },
                 { metricKey: 'Net_Worth' as MetricType, label: lang === 'zh' ? '淨資產需求' : 'Net Worth Required' },
-              ].map(({ metricKey, label }) => (
-                <div key={metricKey} className="rounded-xl border border-slate-700 bg-slate-800 p-5">
-                  <p className="mb-3 text-[10px] uppercase tracking-[0.15em] text-slate-400">{label}</p>
-                  {REGIONS.map((region) => {
-                    const dist = data[region]?.[activeBracket]?.[metricKey];
-                    if (!dist) return null;
-                    const raw = inversePR(targetPR, dist);
-                    const display = region === 'Taiwan'
-                      ? `${fmtTWD(raw)} TWD`
-                      : `${fmtUSD(raw)} USD`;
-                    return (
-                      <div key={region} className="flex items-center justify-between border-b border-slate-700/40 py-1.5 last:border-0">
-                        <span className="text-xs text-slate-400">{regionLabels[region]}</span>
-                        <span className="tabular-nums text-xs text-blue-300">{display}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              ))}
+              ].map(({ metricKey, label }) => {
+                const reverseBracket: AgeBracket = reverseMode === 'all-ages' ? 'all' : age;
+                return (
+                  <div key={metricKey} className="rounded-xl border border-slate-700 bg-slate-800 p-5">
+                    <p className="mb-3 text-[10px] uppercase tracking-[0.15em] text-slate-400">{label}</p>
+                    {REGIONS.map((region) => {
+                      const dist = data[region]?.[reverseBracket]?.[metricKey];
+                      if (!dist) return null;
+                      const raw = inversePR(targetPR, dist);
+                      const display = region === 'Taiwan' ? `${fmtTWD(raw)} TWD` : `${fmtUSD(raw)} USD`;
+                      return (
+                        <div key={region} className="flex items-center justify-between border-b border-slate-700/40 py-1.5 last:border-0">
+                          <span className="text-xs text-slate-400">{regionLabels[region]}</span>
+                          <span className="tabular-nums text-xs text-blue-300">{display}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
             </div>
           </section>
         </>
